@@ -52,8 +52,6 @@ impl AuthClient {
 
         let token = response.json::<Tokens>().await?;
 
-        println!("{:#?}", token);
-
         Ok(token)
     }
 

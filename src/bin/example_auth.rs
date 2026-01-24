@@ -33,6 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>{
     let tokens = client.get_access_tokens(&code_buf.trim()).await?;
 
     println!("Got the access tokens: {:#?}", tokens);
+    //after printing the access tokens you can now copy and paste the access tokens that is the access_token and the refresh token in the .env file or just export them in your environment 
 
     //now lets try to refresh our token (this is done after you have set the refresh token in the .env file or your environment variables )
     let refresh_token = env::var("refresh_token")?;
