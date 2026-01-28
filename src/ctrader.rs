@@ -1,4 +1,4 @@
-use crate::{Account, Endpoint, ProtoEvent, Scope, Tokens, BarData};
+use crate::{Account, Endpoint, StreamEvent, Scope, Tokens, BarData};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -25,7 +25,7 @@ pub struct CtraderClient {
     access_token: String,
     client_secret: String,
     client_id: String,
-    event_tx: mpsc::Sender<ProtoEvent>,
+    event_tx: mpsc::Sender<StreamEvent>,
 }
 
 impl CtraderClient {
@@ -34,7 +34,7 @@ impl CtraderClient {
         access_token: &str,
         client_id: &str,
         client_secret: &str,
-    ) -> Result<(Arc<Self>, mpsc::Receiver<ProtoEvent>), Box<dyn std::error::Error>> {
+    ) -> Result<(Arc<Self>, mpsc::Receiver<StreamEvent>), Box<dyn std::error::Error>> {
         let host = match endpoint {
             Endpoint::Demo => "demo.ctraderapi.com",
             Endpoint::Live => "live.ctraderapi.com",
@@ -76,7 +76,7 @@ impl CtraderClient {
 
         tokio::spawn(async move {
             if let Err(e) = client.read_loop().await {
-                let _ = client.event_tx.send(ProtoEvent::Error(e.to_string())).await;
+                let _ = client.event_tx.send(StreamEvent::Error(e.to_string())).await;
             }
         });
     }
