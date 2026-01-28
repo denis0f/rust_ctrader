@@ -1,4 +1,4 @@
-use crate::types::{Account, ProtoEvent, Scope, Symbol, BarData};
+use crate::types::{Account, StreamEvent, Scope, Symbol, BarData};
 use prost::Message;
 
 
@@ -38,7 +38,7 @@ impl super::CtraderClient {
                     accounts.push(acc);
                 }
 
-                self.event_tx.send(ProtoEvent::Accounts(accounts)).await?;
+                self.event_tx.send(StreamEvent::AccountsData(accounts)).await?;
             }
 
             //this handles the response from the ProtoOaAccountAuthReq
@@ -60,7 +60,7 @@ impl super::CtraderClient {
                     symbols.push(sym);
                 }
 
-                self.event_tx.send(ProtoEvent::Symbol(symbols)).await?;
+                self.event_tx.send(StreamEvent::SymbolsData(symbols)).await?;
             }
 
             //this handles the response from the ProtoOaGetHistoricalTrendbarsReq
@@ -96,7 +96,7 @@ impl super::CtraderClient {
                 }
 
                 //you can send trendbars via event channel if needed
-                self.event_tx.send(ProtoEvent::Trendbars(trendbars)).await?;
+                self.event_tx.send(StreamEvent::TrendbarsData(trendbars)).await?;
             }
 
             //this handles any error response from the stream 
@@ -105,7 +105,7 @@ impl super::CtraderClient {
                 let err_res = super::ProtoOaErrorRes::decode(&data[..])?;
                 let err_msg = err_res.description.unwrap_or_default();
                 eprintln!("Error received from server: {}", err_msg);
-                let _ = self.event_tx.send(ProtoEvent::Error(err_msg)).await;
+                let _ = self.event_tx.send(StreamEvent::Error(err_msg)).await;
             }
 
             // x if x == super::ProtoPayloadType::HeartbeatEvent as i32 => {
