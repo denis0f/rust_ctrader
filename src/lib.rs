@@ -7,7 +7,7 @@ pub mod types;
 pub mod ctrader;
 
 pub use auth::AuthClient;
-pub use types::{Scope, Tokens, Account, Endpoint, StreamEvent, Symbol, BarData};
+pub use types::{Scope, Tokens, Account, Endpoint, StreamEvent, Symbol, BarData, TimeFrame};
 pub use ctrader::CtraderClient;
 
 //pub use ctrader_::CtraderClient;

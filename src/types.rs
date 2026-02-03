@@ -1,9 +1,7 @@
-use core::time;
-
 use serde::Deserialize;
 use round::round;
 
-use crate::open_api::ProtoMessage;
+use crate::open_api::ProtoOaTrendbarPeriod;
 
 #[derive(Debug, Deserialize)]
 pub struct Tokens{
@@ -32,6 +30,8 @@ pub enum Endpoint{
 
 #[derive(Debug)]
 pub enum StreamEvent{
+    ApplicationAuthorized(String),
+    AccountAuthorized(String),
     SymbolsData(Vec<Symbol>),
     Error(String),
     AccountsData(Vec<Account>),
@@ -75,3 +75,28 @@ impl BarData{
 
     }
 }
+
+pub enum TimeFrame{
+    M1 = 1,
+    M5 = 2,
+    M15 = 3,
+    M30 = 4,
+    H1 = 5,
+    H4 = 6,
+    D1 = 7
+}
+
+impl TimeFrame{
+    pub fn change_proto_trendbar_period(&self) -> ProtoOaTrendbarPeriod{
+        match self{
+            TimeFrame::M1 => ProtoOaTrendbarPeriod::M1,
+            TimeFrame::M5 => ProtoOaTrendbarPeriod::M5,
+            TimeFrame::M15 => ProtoOaTrendbarPeriod::M15,
+            TimeFrame::M30 => ProtoOaTrendbarPeriod::M30,
+            TimeFrame::H1 => ProtoOaTrendbarPeriod::H1,
+            TimeFrame::H4 => ProtoOaTrendbarPeriod::H4,
+            TimeFrame::D1 => ProtoOaTrendbarPeriod::D1 
+        }
+    }
+}
+
