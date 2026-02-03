@@ -10,19 +10,19 @@ impl super::CtraderClient {
         match msg.payload_type as i32 {
             //this handles the reponse the ProtoOaApplicationAuthReq
             x if x == super::ProtoOaPayloadType::ProtoOaApplicationAuthRes as i32 => {
-                println!("Application authorized successfully.");
-                println!("Received Application Auth Response: {:#?}", msg);
+                self.event_tx.send(StreamEvent::ApplicationAuthorized(String::from("Application authorized successfully."))).await?;
+            }
+
+            //this handles the response from the ProtoOaAccountAuthReq
+            x if x == super::ProtoOaPayloadType::ProtoOaAccountAuthRes as i32 => {
+                self.event_tx.send(StreamEvent::AccountAuthorized(String::from("Account authorized successfully."))).await?;
             }
 
             //this handles the response from the ProtoOaGetAccountsListByAccessTokenReq
             x if x == super::ProtoOaPayloadType::ProtoOaGetAccountsByAccessTokenRes as i32 => {
                 let mut accounts: Vec<Account> = Vec::new();
-
-                println!("Accounts retreived successfully");
-                println!("Received accounts by access token: {:?}", msg);
                 let data = msg.payload.unwrap();
                 let res = super::ProtoOaGetAccountListByAccessTokenRes::decode(&data[..])?;
-                println!("the data now we have got is : {:#?}", res);
 
                 for account in &res.ctid_trader_account {
                     let acc: Account = Account {
@@ -41,15 +41,10 @@ impl super::CtraderClient {
                 self.event_tx.send(StreamEvent::AccountsData(accounts)).await?;
             }
 
-            //this handles the response from the ProtoOaAccountAuthReq
-            x if x == super::ProtoOaPayloadType::ProtoOaAccountAuthRes as i32 => {
-                println!("Accounts authorized successfully.");
-            }
 
             //this handles the response from the ProtoOaGetSymbolsReq
             x if x == super::ProtoOaPayloadType::ProtoOaSymbolsListRes as i32 => {
                 let mut symbols = Vec::<Symbol>::new();
-                println!("Symbols retreived successfully.");
                 let data = msg.payload.unwrap();
                 let symbols_res = super::ProtoOaSymbolsListRes::decode(&data[..])?;
                 for symbol in &symbols_res.symbol {
@@ -66,14 +61,8 @@ impl super::CtraderClient {
             //this handles the response from the ProtoOaGetHistoricalTrendbarsReq
             x if x == super::ProtoOaPayloadType::ProtoOaGetTrendbarsRes as i32 => {
                 let mut trendbars = Vec::<super::BarData>::new();
-                println!("Historical trendbars received successfully.");
-                println!("the msg received for trendbars is {:#?}", msg);
                 let data = msg.payload.unwrap();
                 let trendbars_res = super::ProtoOaGetTrendbarsRes::decode(&data[..])?;
-                println!(
-                    "the trendbars response received is {:#?}",
-                    trendbars_res
-                );
                 
                 for bar in &trendbars_res.trendbar {
                     let bar_data = BarData {
@@ -104,15 +93,21 @@ impl super::CtraderClient {
                 let data = msg.payload.unwrap();
                 let err_res = super::ProtoOaErrorRes::decode(&data[..])?;
                 let err_msg = err_res.description.unwrap_or_default();
-                eprintln!("Error received from server: {}", err_msg);
                 let _ = self.event_tx.send(StreamEvent::Error(err_msg)).await;
             }
 
-            // x if x == super::ProtoPayloadType::HeartbeatEvent as i32 => {
-            //     println!("Ping request received from server.");
-            // }
+            //this handles heartbeat messages from the server
+            x if x == super::ProtoPayloadType::HeartbeatEvent as i32 => {
+                println!("Heartbeat from the server received.");
+            }
 
+            //this handles any generic error response from the server
+            x if x == super::ProtoPayloadType::ErrorRes as i32 => {
+                println!("Error response received from server.");
+                println!("Full message: {:#?}", msg);
+            }
 
+            //catch-all for unhandled message types
             _ => {
                 println!("Received unhandled message type: {}", msg.payload_type);
                 println!("Full message: {:#?}", msg);
