@@ -1,19 +1,19 @@
-use crate::{Account, Endpoint, StreamEvent, Scope, Tokens, BarData};
+use crate::{BarData, Endpoint, StreamEvent, TimeFrame};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc};
-use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
 use prost::Message;
 
 //the proto definition of different messages to be sent and decoded
 use crate::open_api::{
-    ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes, ProtoOaApplicationAuthReq,
-    ProtoOaApplicationAuthRes, ProtoOaGetAccountListByAccessTokenReq,
-    ProtoOaGetAccountListByAccessTokenRes, ProtoOaPayloadType, ProtoOaSymbolsListReq,
-    ProtoOaSymbolsListRes, ProtoOaTrendbarPeriod, ProtoOaErrorRes, ProtoOaGetTrendbarsReq, ProtoOaGetTrendbarsRes
+    ProtoMessage, ProtoOaAccountAuthReq, ProtoOaApplicationAuthReq,
+    ProtoOaErrorRes, ProtoOaGetAccountListByAccessTokenReq,
+    ProtoOaGetAccountListByAccessTokenRes, ProtoOaGetTrendbarsReq, ProtoOaGetTrendbarsRes,
+    ProtoOaPayloadType, ProtoOaSymbolsListReq, ProtoOaSymbolsListRes,
+    ProtoPayloadType,
 };
 
 //the stream builder module
@@ -30,10 +30,10 @@ pub struct CtraderClient {
 
 impl CtraderClient {
     pub async fn connect(
-        endpoint: Endpoint,
-        access_token: &str,
         client_id: &str,
         client_secret: &str,
+        access_token: &str,
+        endpoint: Endpoint,
     ) -> Result<(Arc<Self>, mpsc::Receiver<StreamEvent>), Box<dyn std::error::Error>> {
         let host = match endpoint {
             Endpoint::Demo => "demo.ctraderapi.com",
@@ -43,7 +43,7 @@ impl CtraderClient {
             .await
             .expect("Failed to initialize the stream.");
 
-        let (event_tx, mut event_rx) = mpsc::channel(100);
+        let (event_tx, event_rx) = mpsc::channel(100);
 
         let client = Self {
             stream: Arc::new(Mutex::new(stream_)),
@@ -76,19 +76,31 @@ impl CtraderClient {
 
         tokio::spawn(async move {
             if let Err(e) = client.read_loop().await {
-                let _ = client.event_tx.send(StreamEvent::Error(e.to_string())).await;
+                let _ = client
+                    .event_tx
+                    .send(StreamEvent::Error(e.to_string()))
+                    .await;
             }
         });
     }
 
     async fn read_loop(&self) -> anyhow::Result<()> {
         loop {
-            let msg = self.read_proto_message().await.unwrap();
-            self.handle_proto_message(msg).await.unwrap();
+            match self.read_proto_message().await {
+                Ok(msg) => {
+                    if let Err(e) = self.handle_proto_message(msg).await {
+                        return Err(anyhow::anyhow!(e.to_string()));
+                    }
+                }
+                Err(e) => {
+                    // EOF or connection error → exit loop
+                    return Err(anyhow::anyhow!(e.to_string()));
+                }
+            }
         }
     }
 
-    async fn read_proto_message(&self) -> Result<ProtoMessage, Box<dyn std::error::Error>> {
+    async fn read_proto_message(&self) -> anyhow::Result<ProtoMessage> {
         let mut stream = self.stream.lock().await;
         let len = stream.read_u32().await?;
 
@@ -120,8 +132,6 @@ impl CtraderClient {
             .await
             .expect("Failed to send application authorization request");
 
-        println!("the message is now sent to the reader loop");
-
         Ok(())
     }
 
@@ -145,8 +155,6 @@ impl CtraderClient {
             .await
             .expect("Failed to send get accounts request");
 
-        println!("the get accounts message is now sent to the reader loop");
-
         Ok(())
     }
 
@@ -154,7 +162,7 @@ impl CtraderClient {
         &self,
         account_id: i64,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Authorizing account with ID: {}", account_id);
+        println!("Authorizing account with ID: {}...", account_id);
         // Implementation for authorizing the account
         let _auth_request = ProtoOaAccountAuthReq {
             payload_type: Some(ProtoOaPayloadType::ProtoOaAccountAuthReq as i32),
@@ -173,8 +181,6 @@ impl CtraderClient {
         self.send_message(_message)
             .await
             .expect("Failed to send account authorization request");
-
-        println!("the account authorization message is now sent to the reader loop");
 
         Ok(())
     }
@@ -204,21 +210,20 @@ impl CtraderClient {
             .await
             .expect("Failed to send get symbols request");
 
-        println!("the get symbols message is now sent to the reader loop");
-
         Ok(())
     }
-
 
     pub async fn get_trend_bar_data(
         &self,
         symbol_id: i64,
-        period: ProtoOaTrendbarPeriod,
+        period: TimeFrame,
         account_id: i64,
         from_timestamp: i64,
         to_timestamp: i64,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Getting trend bar data...");
+        println!("Getting historical trend bar data...");
+
+        let period = period.change_proto_trendbar_period();
 
         let req = ProtoOaGetTrendbarsReq {
             payload_type: Some(ProtoOaPayloadType::ProtoOaGetTrendbarsReq as i32),
@@ -227,9 +232,9 @@ impl CtraderClient {
             ctid_trader_account_id: account_id,
             from_timestamp: Some(from_timestamp),
             to_timestamp: Some(to_timestamp),
-            count: Some(200)
+            count: Some(200),
         };
-        
+
         let req_encoded = req.encode_to_vec();
         let message = ProtoMessage {
             payload_type: ProtoOaPayloadType::ProtoOaGetTrendbarsReq as u32,
@@ -240,10 +245,7 @@ impl CtraderClient {
             .await
             .expect("Failed to send get trend bar data request");
 
-        println!("the get trend bar data message is now sent to the reader loop");
         // Implementation for getting historical bar data
         Ok(())
     }
-
-
 }
