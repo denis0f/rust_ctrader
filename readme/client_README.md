@@ -1,146 +1,121 @@
 # CtraderClient
 
-This document describes the **`CtraderClient`**, the core networking client responsible for connecting to cTrader Open API servers, sending protobuf messages, and handling incoming responses and events.
+This README explains how to use the **`CtraderClient`**, which is responsible for connecting to the cTrader Open API over secure TCP/TLS, sending protobuf requests, and handling all streamed responses via events.
 
-This client sits **after authentication** and uses an already-issued access token to communicate with cTrader over **secure TCP/TLS**.
-
----
-
-## What the CtraderClient Does
-
-The `CtraderClient` is responsible for:
-
-* Establishing **TLS-encrypted TCP connections** to cTrader servers
-* Supporting **Demo** and **Live** environments
-* Sending protobuf-encoded Open API requests
-* Reading and decoding protobuf responses
-* Dispatching parsed data via async event channels
-
-It acts as the **transport + protocol layer** of the library.
+This client is used **after you already obtain an access token** through the AuthClient.
 
 ---
 
-## Key Responsibilities
+## 🚀 What the CtraderClient Does
 
-### Secure Connection
+The client acts as the **network + protocol layer** of the library:
 
-* Connects to `demo.ctraderapi.com` or `live.ctraderapi.com`
-* Uses `tokio`, `tokio-rustls`, and `TcpStream`
-* Manages a shared TLS stream safely using `Arc<Mutex<>>`
-
----
-
-### Message Sending
-
-All requests are sent as:
-
-1. Message length (`u32`)
-2. Protobuf-encoded `ProtoMessage`
-
-```text
-[length][protobuf payload]
-```
-
-This matches the cTrader Open API binary protocol.
-
----
-
-### Message Reading & Dispatching
-
-* Continuously reads messages from the socket
-* Decodes them into `ProtoMessage`
-* Routes them to the appropriate handler
+* Connects to **Demo** or **Live** cTrader servers via TLS
+* Sends protobuf‑encoded OpenAPI messages
+* Reads and decodes responses
 * Emits structured events via an async channel
+* Supports application & account authorization
+* Fetching account lists, symbols, and historical trend bars
 
 ---
 
-## Supported Operations
+## 📦 Example Usage Overview (Matches the Example Client)
 
-The current client implementation supports:
+Your typical workflow looks like:
 
-* Application authorization
-* Account listing by access token
-* Account authorization
-* Symbol list retrieval
-* Historical trend bar (candlestick) data
-* Error handling and propagation
+1. Load environment variables (`client_id`, `client_secret`, `access_token`)
+2. Connect using `CtraderClient::connect`
+3. Start background read loop with `client.start()`
+4. Authorize the **application**
+5. After receiving `ApplicationAuthorized`, request **accounts**
+6. After receiving `AccountsData`, authorize a specific **account**
+7. After receiving `AccountAuthorized`, request **symbols**
+8. After receiving `SymbolsData`, request **trend bars**
+9. Handle returned data from `TrendbarsData`
 
-More trading and streaming features can be layered on top of this foundation.
+This mirrors the example client you're shipping with the library.
 
 ---
 
-## Creating a Client
+## 🔌 Creating and Connecting a Client
 
 ```rust
 use rust_ctrader::{CtraderClient, Endpoint};
 
 let (client, mut events) = CtraderClient::connect(
-    Endpoint::Demo,
-    &access_token,
     &client_id,
     &client_secret,
+    &access_token,
+    Endpoint::Demo,
 ).await?;
 ```
 
-* Returns a shared `Arc<CtraderClient>`
-* Returns an `mpsc::Receiver<StreamEvent>` for async events
+* Returns `Arc<CtraderClient>`
+* Returns `mpsc::Receiver<StreamEvent>` for receiving events
 
 ---
 
-## Starting the Read Loop
-
-The read loop must be started to receive responses from the server.
+## ▶️ Starting the Background Read Loop
 
 ```rust
 client.start().await;
 ```
 
-This spawns a background task that continuously listens for incoming messages.
+This must be called or you **will not receive responses**.
 
 ---
 
-## Example: Authorize Application & Account
+## 🔐 Authorizing Application & Account
 
 ```rust
-// authorize the application
 client.authorize_application().await?;
+```
 
-// request accounts
+Events will guide the flow:
+
+### On `ApplicationAuthorized`
+
+```rust
 client.get_accounts().await?;
+```
 
-// later, authorize a specific account
+### On `AccountsData`
+
+```rust
 client.authorize_account(account_id).await?;
 ```
 
-Responses are received asynchronously through `StreamEvent`.
-
 ---
 
-## Example: Fetch Symbols
+## 📄 Requesting Symbols
 
 ```rust
 client.get_symbols(account_id, false).await?;
 ```
 
-This sends a symbols list request and emits `StreamEvent::SymbolsData` once received.
+This emits:
+
+```rust
+StreamEvent::SymbolsData(Vec<Symbol>)
+```
 
 ---
 
-## Example: Fetch Historical Trend Bars
+## 📊 Fetching Historical Trend Bars (Candles)
 
 ```rust
-use rust_ctrader::open_api::ProtoOaTrendbarPeriod;
+use rust_ctrader::TimeFrame;
 
 client.get_trend_bar_data(
     symbol_id,
-    ProtoOaTrendbarPeriod::D1,
+    TimeFrame::D1,
     account_id,
     from_timestamp,
     to_timestamp,
 ).await?;
 ```
 
-Trend bar data is returned asynchronously via:
+Trend bars are emitted as:
 
 ```rust
 StreamEvent::TrendbarsData(Vec<BarData>)
@@ -148,16 +123,16 @@ StreamEvent::TrendbarsData(Vec<BarData>)
 
 ---
 
-## Handling Events
-
-All decoded responses are pushed into an async channel:
+## 📥 Handling Stream Events (Core of Usage)
 
 ```rust
 while let Some(event) = events.recv().await {
     match event {
-        StreamEvent::AccountsData(accounts) => { /* handle accounts */ }
-        StreamEvent::SymbolsData(symbols) => { /* handle symbols */ }
-        StreamEvent::TrendbarsData(bars) => { /* handle bars */ }
+        StreamEvent::ApplicationAuthorized(msg) => { /* request accounts */ }
+        StreamEvent::AccountsData(accounts) => { /* authorize account */ }
+        StreamEvent::AccountAuthorized(msg) => { /* request symbols */ }
+        StreamEvent::SymbolsData(symbols) => { /* request trend bars */ }
+        StreamEvent::TrendbarsData(bars) => { /* handle data */ }
         StreamEvent::Error(err) => eprintln!("Error: {}", err),
         _ => {}
     }
@@ -166,29 +141,21 @@ while let Some(event) = events.recv().await {
 
 ---
 
-## Error Handling
+## ⚠️ Notes from Example
 
-* Server-side errors are decoded from `ProtoOaErrorRes`
-* Errors are forwarded as `StreamEvent::Error`
-* Connection or decode failures are surfaced immediately
-
----
-
-## Design Notes
-
-* Async-first (`tokio`)
-* Thread-safe shared stream access
-* Minimal abstraction over the Open API protocol
-* Easy to extend with new protobuf request/response types
+* `account_id` must be selected from `AccountsData`
+* Timestamps are in **milliseconds** (use `chrono` for convenience)
+* You can choose any symbol (example uses **XAUUSD**)
+* The stream sends multiple event types — always match on `StreamEvent`
 
 ---
 
-## Summary
+## 📝 Summary
 
-`CtraderClient` is the **core engine** of the library:
+The `CtraderClient` is:
 
-* Handles secure communication
-* Encodes and decodes Open API messages
-* Emits strongly-typed events
+* The **TCP/TLS engine** for the cTrader Open API
+* A **protobuf message sender/receiver**
+* An **event‑driven stream client** that powers account, symbol, and data queries
 
-It provides a solid foundation for building trading systems, bots, and analytics on top of cTrader Open API.
+Use the example client provided in the repo to see a full end‑to‑end flow.
