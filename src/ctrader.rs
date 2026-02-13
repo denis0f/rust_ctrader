@@ -1,4 +1,4 @@
-use crate::{BarData, Endpoint, StreamEvent, TimeFrame};
+use crate::{BarData, Endpoint, StreamEvent, TimeFrame, Order};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -9,11 +9,15 @@ use prost::Message;
 
 //the proto definition of different messages to be sent and decoded
 use crate::open_api::{
-    ProtoMessage, ProtoOaAccountAuthReq, ProtoOaApplicationAuthReq,
+    ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes, ProtoOaApplicationAuthReq,
     ProtoOaErrorRes, ProtoOaGetAccountListByAccessTokenReq,
     ProtoOaGetAccountListByAccessTokenRes, ProtoOaGetTrendbarsReq, ProtoOaGetTrendbarsRes,
     ProtoOaPayloadType, ProtoOaSymbolsListReq, ProtoOaSymbolsListRes,
-    ProtoPayloadType,
+    ProtoPayloadType, ProtoHeartbeatEvent, ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes, ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes,
+    ProtoOaSubscribeLiveTrendbarReq, ProtoOaSubscribeLiveTrendbarRes, ProtoOaUnsubscribeLiveTrendbarReq, ProtoOaUnsubscribeLiveTrendbarRes,
+    ProtoOaSpotEvent, 
+    ProtoOaTrader, ProtoOaTraderReq, ProtoOaTraderRes, ProtoOaTradeData, ProtoOaNewOrderReq, ProtoOaClosePositionReq,
+    ProtoOaTradeSide, ProtoOaOrderType, ProtoOaOrderErrorEvent, ProtoOaExecutionEvent
 };
 
 //the stream builder module
@@ -89,10 +93,12 @@ impl CtraderClient {
             match self.read_proto_message().await {
                 Ok(msg) => {
                     if let Err(e) = self.handle_proto_message(msg).await {
+                        println!("Error handling proto message: {}", e);
                         return Err(anyhow::anyhow!(e.to_string()));
                     }
                 }
                 Err(e) => {
+                    println!("Error reading proto message: {}", e);
                     // EOF or connection error → exit loop
                     return Err(anyhow::anyhow!(e.to_string()));
                 }
@@ -245,7 +251,78 @@ impl CtraderClient {
             .await
             .expect("Failed to send get trend bar data request");
 
-        // Implementation for getting historical bar data
         Ok(())
     }
+    pub async fn keep_alive(&self) -> Result<(), Box<dyn std::error::Error>> {
+        println!("Sending keep-alive heartbeat...");
+        // Implementation for keep-alive mechanism
+        let heartbeat = ProtoHeartbeatEvent {
+            payload_type: Some(ProtoPayloadType::HeartbeatEvent as i32),
+        };
+
+        self.send_message(ProtoMessage {
+            payload_type: ProtoPayloadType::HeartbeatEvent as u32,
+            payload: Some(heartbeat.encode_to_vec()),
+            client_msg_id: Some(String::from("keep alive")),
+        })
+        .await
+        .expect("Failed to send heartbeat message");
+
+        Ok(())
+    }
+
+
+    pub async fn subscribe_spot(&self, account_id: i64, symbol_id: i64) -> Result<(), Box<dyn std::error::Error>> {
+        let subscribe_request = ProtoOaSubscribeSpotsReq {
+            payload_type: Some(ProtoOaPayloadType::ProtoOaSubscribeSpotsReq as i32),
+            ctid_trader_account_id: account_id, //account_id,
+            symbol_id: vec![symbol_id],
+            subscribe_to_spot_timestamp: Some(true),
+        };
+
+        let subscribe_request_encoded = subscribe_request.encode_to_vec();
+
+        let message = ProtoMessage {
+            payload_type: ProtoOaPayloadType::ProtoOaSubscribeSpotsReq as u32,
+            payload: Some(subscribe_request_encoded),
+            client_msg_id: Some(String::from("subscribe to spot events")),
+        };
+
+        self.send_message(message)
+            .await
+            .expect("Failed to send subscribe to spot events request");
+
+        Ok(())
+    }
+
+    pub async fn subscribe_live_bars(&self, account_id: i64, symbol_id: i64, timeframe: TimeFrame) -> Result<(), Box<dyn std::error::Error>> {
+
+        //first subscribe to the live spot events for the symbol
+        self.subscribe_spot(account_id, symbol_id).await?;
+
+        let subscribe_request = ProtoOaSubscribeLiveTrendbarReq {
+            payload_type: Some(ProtoOaPayloadType::ProtoOaSubscribeLiveTrendbarReq as i32),
+            ctid_trader_account_id: account_id,
+            symbol_id: symbol_id,
+            period: timeframe.change_proto_trendbar_period() as i32,
+        };
+
+        let subscribe_request_encoded = subscribe_request.encode_to_vec();
+
+        let message = ProtoMessage {
+            payload_type: ProtoOaPayloadType::ProtoOaSubscribeLiveTrendbarReq as u32,
+            payload: Some(subscribe_request_encoded),
+            client_msg_id: Some(String::from("subscribe to live bars")),
+        };
+
+        self.send_message(message)
+            .await
+            .expect("Failed to send subscribe to live bars request");
+
+        Ok(())
+    }
+
+
+
+
 }
