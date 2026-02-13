@@ -1,6 +1,7 @@
-use crate::types::{Account, StreamEvent, Scope, Symbol, BarData};
+use crate::types::{Account, BarData, Quote, Scope, StreamEvent, Symbol};
 use prost::Message;
 
+use crate::handle_option_value;
 
 impl super::CtraderClient {
     pub async fn handle_proto_message(
@@ -10,12 +11,24 @@ impl super::CtraderClient {
         match msg.payload_type as i32 {
             //this handles the reponse the ProtoOaApplicationAuthReq
             x if x == super::ProtoOaPayloadType::ProtoOaApplicationAuthRes as i32 => {
-                self.event_tx.send(StreamEvent::ApplicationAuthorized(String::from("Application authorized successfully."))).await?;
+                self.event_tx
+                    .send(StreamEvent::ApplicationAuthorized(String::from(
+                        "Application authorized successfully.",
+                    )))
+                    .await?;
             }
 
             //this handles the response from the ProtoOaAccountAuthReq
             x if x == super::ProtoOaPayloadType::ProtoOaAccountAuthRes as i32 => {
-                self.event_tx.send(StreamEvent::AccountAuthorized(String::from("Account authorized successfully."))).await?;
+                println!("Account authorization response received from server.");
+                println!("Full message: {:#?}", msg);
+                let decoded_msg = super::ProtoOaAccountAuthRes::decode(&msg.payload.unwrap()[..])?;
+                println!("Decoded message: {:#?}", decoded_msg);
+                self.event_tx
+                    .send(StreamEvent::AccountAuthorized(String::from(
+                        "Account authorized successfully.",
+                    )))
+                    .await?;
             }
 
             //this handles the response from the ProtoOaGetAccountsListByAccessTokenReq
@@ -38,9 +51,10 @@ impl super::CtraderClient {
                     accounts.push(acc);
                 }
 
-                self.event_tx.send(StreamEvent::AccountsData(accounts)).await?;
+                self.event_tx
+                    .send(StreamEvent::AccountsData(accounts))
+                    .await?;
             }
-
 
             //this handles the response from the ProtoOaGetSymbolsReq
             x if x == super::ProtoOaPayloadType::ProtoOaSymbolsListRes as i32 => {
@@ -55,7 +69,9 @@ impl super::CtraderClient {
                     symbols.push(sym);
                 }
 
-                self.event_tx.send(StreamEvent::SymbolsData(symbols)).await?;
+                self.event_tx
+                    .send(StreamEvent::SymbolsData(symbols))
+                    .await?;
             }
 
             //this handles the response from the ProtoOaGetHistoricalTrendbarsReq
@@ -63,11 +79,11 @@ impl super::CtraderClient {
                 let mut trendbars = Vec::<super::BarData>::new();
                 let data = msg.payload.unwrap();
                 let trendbars_res = super::ProtoOaGetTrendbarsRes::decode(&data[..])?;
-                
+
                 for bar in &trendbars_res.trendbar {
                     let bar_data = BarData {
                         open: bar.delta_open.unwrap() as f64,
-                        close: bar.delta_close.unwrap() as f64,
+                        close: handle_option_value(bar.delta_close.map(|v| v as f64)),
                         high: bar.delta_high.unwrap() as f64,
                         low: bar.low.unwrap() as f64,
                         volume: bar.volume as u64,
@@ -76,7 +92,7 @@ impl super::CtraderClient {
                     let bar_data = bar_data.change_to_actual_symbol_price(
                         bar.low.unwrap() as u64,
                         bar.delta_high.unwrap() as u64,
-                        bar.delta_close.unwrap() as u64,
+                        handle_option_value(bar.delta_close.map(|v| v as u64)),
                         bar.delta_open.unwrap() as u64,
                         bar.volume as u64,
                         bar.utc_timestamp_in_minutes.unwrap() as u64,
@@ -85,10 +101,12 @@ impl super::CtraderClient {
                 }
 
                 //you can send trendbars via event channel if needed
-                self.event_tx.send(StreamEvent::TrendbarsData(trendbars)).await?;
+                self.event_tx
+                    .send(StreamEvent::TrendbarsData(trendbars))
+                    .await?;
             }
 
-            //this handles any error response from the stream 
+            //this handles any error response from the stream
             x if x == super::ProtoOaPayloadType::ProtoOaErrorRes as i32 => {
                 let data = msg.payload.unwrap();
                 let err_res = super::ProtoOaErrorRes::decode(&data[..])?;
@@ -106,6 +124,76 @@ impl super::CtraderClient {
                 println!("Error response received from server.");
                 println!("Full message: {:#?}", msg);
             }
+
+            //this handles spot data updates if you have subscribed to them
+            x if x == super::ProtoOaPayloadType::ProtoOaSubscribeSpotsRes as i32 => {
+                self.event_tx
+                    .send(StreamEvent::SubscribeSpotsData(String::from(
+                        "Subscribed to spot data successfully.",
+                    )))
+                    .await?;
+            }
+
+            //this handles the live_bars subscribed response
+            x if x == super::ProtoOaPayloadType::ProtoOaSubscribeLiveTrendbarRes as i32 => {
+                self.event_tx
+                    .send(StreamEvent::SubscribeLiveBarsData(String::from(
+                        "Subscribed to live bars data successfully.",
+                    )))
+                    .await?;
+            }
+
+            //this handles the ProtoSpotEvent
+            x if x == super::ProtoOaPayloadType::ProtoOaSpotEvent as i32 => {
+                self.keep_alive().await?; //send a keep-alive message to prevent disconnection due to inactivity
+                let data = msg.payload.unwrap();
+                let spot_event = super::ProtoOaSpotEvent::decode(&data[..])?;
+                let quote = Quote {
+                    symbol_id: spot_event.symbol_id,
+                    bid: handle_option_value(spot_event.bid.map(|v| v as f64)),
+                    ask: handle_option_value(spot_event.ask.map(|v| v as f64)),
+                    timestamp: spot_event.timestamp.unwrap() as u64,
+                };
+                //here check if the vector is empty or not before unwrapping, otherwise it will panic if the server sends an empty vector for some reason
+                if !spot_event.trendbar.is_empty() {
+                    let bar = spot_event.trendbar.last().unwrap(); //get the latest bar data from the vector
+                    let bar_data = BarData {
+                        open: bar.delta_open.unwrap() as f64,
+                        close: handle_option_value(bar.delta_close.map(|v| v as f64)),
+                        high: bar.delta_high.unwrap() as f64,
+                        low: bar.low.unwrap() as f64,
+                        volume: bar.volume as u64,
+                        timestamp: bar.utc_timestamp_in_minutes.unwrap() as u64,
+                    };
+                    let bar_data = bar_data.change_to_actual_symbol_price(
+                        bar.low.unwrap() as u64,
+                        bar.delta_high.unwrap() as u64,
+                        handle_option_value(bar.delta_close.map(|v| v as u64)),
+                        bar.delta_open.unwrap() as u64,
+                        bar.volume as u64,
+                        bar.utc_timestamp_in_minutes.unwrap() as u64,
+                    );
+                    self.event_tx
+                        .send(StreamEvent::LiveData((Some(quote), Some(bar_data))))
+                        .await?;
+                } else {
+                    self.event_tx.send(StreamEvent::LiveData((Some(quote), None))).await?;
+                }
+            }
+
+            //this handles the trade response from the server after placing a new order or closing a position
+
+            //this handles disconnection notifications
+            x if x == super::ProtoOaPayloadType::ProtoOaClientDisconnectEvent as i32 => {
+                println!("Disconnection notification received from server.");
+                println!("Full message: {:#?}", msg);
+            }
+
+            //this handles the order event errors 
+
+
+            //handles the exectuion event 
+
 
             //catch-all for unhandled message types
             _ => {

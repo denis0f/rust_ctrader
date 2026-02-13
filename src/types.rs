@@ -37,7 +37,7 @@ pub enum StreamEvent {
     AccountsData(Vec<Account>),
     TrendbarsData(Vec<BarData>),
     QuotesData(Vec<Quote>),
-    LiveData((Quote, BarData)),
+    LiveData((Option<Quote>, Option<BarData>)),
     SubscribeSpotsData(String),
     SubscribeLiveBarsData(String),
     Error(String),
