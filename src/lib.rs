@@ -5,20 +5,15 @@ pub mod auth;
 pub mod types;
 //pub mod ctrader_;
 pub mod ctrader;
+pub mod utilities;
 
 pub use auth::AuthClient;
 pub use ctrader::CtraderClient;
 pub use types::{
     Account, BarData, Endpoint, Quote, Scope, StreamEvent,
-    Symbol, TimeFrame, Tokens, Order
+    Symbol, TimeFrame, Tokens, Order, RelativeBarData
 };
 
 //pub use ctrader_::CtraderClient;
 
 
-pub fn handle_option_value<T>(option: Option<T>) -> Option<T> {
-    match option {
-        Some(value) => Some(value),
-        None => None
-    }
-}
