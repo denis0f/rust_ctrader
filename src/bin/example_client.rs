@@ -26,8 +26,73 @@
 // 8. Run the binary with `cargo run --bin example_client` after populating .env.
 
 use dotenv::dotenv;
-use rust_ctrader::{CtraderClient, Endpoint, StreamEvent, TimeFrame};
+use rust_ctrader::{CtraderClient, Endpoint, StreamEvent, TimeFrame, types::Order, types::TradeSide, types::OrderType};
 use std::env;
+use std::collections::VecDeque;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Signal {
+    Buy,
+    Sell,
+    Hold,
+}
+
+struct Ema {
+    period: usize,
+    multiplier: f64,
+    buffer: VecDeque<f64>,
+    emas: Vec<f64>,
+    last_ema: Option<f64>,
+}
+
+impl Ema {
+    fn new(period: usize) -> Self {
+        Self {
+            period,
+            multiplier: 2.0 / (period as f64 + 1.0),
+            buffer: VecDeque::with_capacity(period),
+            emas: Vec::new(),
+            last_ema: None,
+        }
+    }
+
+    fn update(&mut self, close: f64) -> Option<f64> {
+        if let Some(prev_ema) = self.last_ema {
+            let ema = (close - prev_ema) * self.multiplier + prev_ema;
+            self.emas.push(ema);
+            self.last_ema = Some(ema);
+            println!("Ema: {:?}", self.emas);
+            return Some(ema);
+        }
+
+        self.buffer.push_back(close);
+
+        if self.buffer.len() < self.period {
+            return None;
+        }
+
+        let sma = self.buffer.iter().sum::<f64>() / self.period as f64;
+        self.last_ema = Some(sma);
+
+        Some(sma)
+    }
+}
+
+fn get_crossover_signal(ema_short: Option<f64>, ema_long: Option<f64>) -> Signal {
+    match (ema_short, ema_long) {
+        (Some(short), Some(long)) => {
+            if short > long {
+                Signal::Buy
+            } else if short < long {
+                Signal::Sell
+            } else {
+                Signal::Hold
+            }
+        }
+        _ => Signal::Hold,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>>{
     dotenv().ok();
@@ -42,7 +107,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>{
 
     client.authorize_application().await?;
 
-    let mut account_id = 0_i64; // Replace with a valid account ID after retrieving accounts
+    let mut account_id = 0_i64;
+    let mut ema5 = Ema::new(5);
+    let mut ema8 = Ema::new(8);
 
     //listen for events
     while let Some(event) = event_rx.recv().await{
@@ -53,18 +120,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>{
             }
             StreamEvent::AccountsData(accounts) => {
                 println!("Accounts data received: {:#?}", accounts);
-                account_id = accounts[1].id as i64; //select the first account for authorization
-                client.authorize_account(accounts[1].id as i64).await?;
+                account_id = accounts[1].id as i64; //select the second account for authorization
+                client.authorize_account(accounts[1].id as i64).await?; 
             }
             StreamEvent::AccountAuthorized(msg) => {
                 println!("Account authorized event received: {}", msg);
-                // Further actions can be taken here after account authorization
-                if account_id != 0_i64{
-                    client.get_symbols(account_id, false).await?;
-                }                
+                //Further actions can be taken here after account authorization
+                // if account_id != 0_i64{
+                //     client.get_symbols(account_id, false).await?;
+                // }           
+                //requesting trend bar data for the last week for the selected symbol client.get_trend_bar_data(symbols[4].symbol_id as i64, TimeFrame::M1, account_id, from_timestamp, to_timestamp).await?;
+                
+                client.subscribe_live_bars(account_id, 41 as i64, TimeFrame::M1).await?;
+
             }
             StreamEvent::SymbolsData(symbols) => {
-                println!("Symbols data received: {:#?}", symbols[4]);
+                println!("Symbols data received: {:#?}", symbols);
 
                 //prepare the timestamp from last monday to today in milliseconds using the chrono crate
                 use chrono::{Utc, Datelike, Duration};
@@ -73,27 +144,85 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>{
                 let from_timestamp = last_monday.timestamp_millis();
                 let to_timestamp = now.timestamp_millis();
 
+                //client.get_symbol_by_id(account_id, symbols[0].symbol_id as i64).await?;
 
-                for symbol in symbols{
-                    if symbol.symbol_name == "XAUUSD"{
-                        println!("the symbol id for XAUUSD is {}", symbol.symbol_id);
-                        client.get_trend_bar_data(symbol.symbol_id as i64, TimeFrame::D1, account_id, from_timestamp, to_timestamp).await?;
-                        break;
-                    }
-                }
 
+                //calling the subscribe function
+                //client.subscribe_live_bars(account_id, symbols[4].symbol_id as i64, TimeFrame::M1).await?;
+                //client.new_order().await?; //requesting trend bar data for the last week for the selected symbol client.get_trend_bar_data(symbols[4].symbol_id as i64, TimeFrame::M1, account_id, from_timestamp, to_timestamp).await?;
             }
             StreamEvent::TrendbarsData(trendbars) => {
                 println!("Trend bars data received: {:#?}", trendbars);
                 // Further actions can be taken here after receiving trend bars data
+
             }
+            
+            StreamEvent::LiveData((quote, bar_data, last_closed_candle)) => {
+                //println!("Live data received: Quote: {:#?}, \n BarData: {:#?}, last candle to close is {:?}", quote, bar_data, last_closed_candle);
+
+                // Extract close price from last closed candle and update EMAs
+                if let Some(candle) = last_closed_candle {
+                    println!("Processing last closed candle: {:#?}", candle);
+                    if let Some(close_price) = candle.close {
+                        let ema5_val = ema5.update(close_price);
+                        let ema8_val = ema8.update(close_price);
+
+                        println!("EMA5: {:?}, EMA8: {:?}", ema5_val, ema8_val);
+
+                        // Check for crossover signal when both EMAs are calculated
+                        let signal = get_crossover_signal(ema5_val, ema8_val);
+                        println!("Trading Signal: {:?}", signal);
+
+                        // Place order on Buy or Sell signal
+                        if signal == Signal::Buy || signal == Signal::Sell {
+                            let trade_side = match signal {
+                                Signal::Buy => TradeSide::Buy,
+                                Signal::Sell => TradeSide::Sell,
+                                Signal::Hold => unreachable!(),
+                            };
+
+                            let order = Order {
+                                account_id: account_id as u64,
+                                symbol_id: 41,
+                                order_type: OrderType::Market,
+                                trade_side: trade_side.clone(),
+                                lotsize: 1.0,
+                                limit_price: None,
+                                stop_price: None,
+                                time_in_force: None,
+                                expiration_timestamp: None,
+                                comment: Some("Auto trade from EMA crossover".to_string()),
+                                slippage_in_points: None,
+                                label: None,
+                                client_order_id: None,
+                                relative_stop_loss: None,
+                                relative_take_profit: None,
+                                guaranteed_stop_loss: None,
+                                trailing_stop_loss: None,
+                            };
+
+                            println!("Placing {:?} order with signal: {:?}", trade_side, signal);
+                            match client.new_order(order).await {
+                                Ok(_) => println!("Order placed successfully"),
+                                Err(e) => eprintln!("Failed to place order: {}", e),
+                            }
+                        }
+                    }
+                }
+            }
+            
             StreamEvent::Error(err_msg) => {
                 eprintln!("Error event received: {}", err_msg);
+                
             }
-            _ => {}
+
+            _ => {
+            }
         }
     }
 
     Ok(())
 
 }
+
+
