@@ -1,13 +1,19 @@
-use crate::types::{Account, BarData, Quote, Scope, StreamEvent, Symbol};
+use crate::types::{Account, BarData, Quote, RelativeBarData, Scope, StreamEvent, Symbol};
 use prost::Message;
 
-use crate::handle_option_value;
+use crate::utilities::handle_option_value;
 
 impl super::CtraderClient {
     pub async fn handle_proto_message(
         &self,
         msg: super::ProtoMessage,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        
+        // grab locks for the mutable live-bar state once per invocation
+        let mut last_bar_guard = self.last_bar.lock().await;
+        let mut last_quote_guard = self.last_quote.lock().await;
+        let mut last_bar_ts_guard = self.last_bar_ts.lock().await;
+
         match msg.payload_type as i32 {
             //this handles the reponse the ProtoOaApplicationAuthReq
             x if x == super::ProtoOaPayloadType::ProtoOaApplicationAuthRes as i32 => {
@@ -20,10 +26,7 @@ impl super::CtraderClient {
 
             //this handles the response from the ProtoOaAccountAuthReq
             x if x == super::ProtoOaPayloadType::ProtoOaAccountAuthRes as i32 => {
-                println!("Account authorization response received from server.");
-                println!("Full message: {:#?}", msg);
                 let decoded_msg = super::ProtoOaAccountAuthRes::decode(&msg.payload.unwrap()[..])?;
-                println!("Decoded message: {:#?}", decoded_msg);
                 self.event_tx
                     .send(StreamEvent::AccountAuthorized(String::from(
                         "Account authorized successfully.",
@@ -81,22 +84,16 @@ impl super::CtraderClient {
                 let trendbars_res = super::ProtoOaGetTrendbarsRes::decode(&data[..])?;
 
                 for bar in &trendbars_res.trendbar {
-                    let bar_data = BarData {
-                        open: bar.delta_open.unwrap() as f64,
-                        close: handle_option_value(bar.delta_close.map(|v| v as f64)),
-                        high: bar.delta_high.unwrap() as f64,
+                    let bar_data = RelativeBarData {
+                        delta_open: bar.delta_open.unwrap() as f64,
+                        delta_close: handle_option_value(bar.delta_close.map(|v| v as f64)),
+                        delta_high: bar.delta_high.unwrap() as f64,
                         low: bar.low.unwrap() as f64,
                         volume: bar.volume as u64,
                         timestamp: bar.utc_timestamp_in_minutes.unwrap() as u64,
-                    };
-                    let bar_data = bar_data.change_to_actual_symbol_price(
-                        bar.low.unwrap() as u64,
-                        bar.delta_high.unwrap() as u64,
-                        handle_option_value(bar.delta_close.map(|v| v as u64)),
-                        bar.delta_open.unwrap() as u64,
-                        bar.volume as u64,
-                        bar.utc_timestamp_in_minutes.unwrap() as u64,
-                    );
+                    }
+                    .change_to_actual_symbol_price();
+
                     trendbars.push(bar_data);
                 }
 
@@ -153,31 +150,62 @@ impl super::CtraderClient {
                     bid: handle_option_value(spot_event.bid.map(|v| v as f64)),
                     ask: handle_option_value(spot_event.ask.map(|v| v as f64)),
                     timestamp: spot_event.timestamp.unwrap() as u64,
-                };
-                //here check if the vector is empty or not before unwrapping, otherwise it will panic if the server sends an empty vector for some reason
+                }
+                .change_to_actual_quote_price();
+
+                //give me a bar that has data with zeros
+
+                // if there are trendbars attached, check timestamp changes and handle closed candle
                 if !spot_event.trendbar.is_empty() {
                     let bar = spot_event.trendbar.last().unwrap(); //get the latest bar data from the vector
-                    let bar_data = BarData {
-                        open: bar.delta_open.unwrap() as f64,
-                        close: handle_option_value(bar.delta_close.map(|v| v as f64)),
-                        high: bar.delta_high.unwrap() as f64,
+                    let bar_data = RelativeBarData {
+                        delta_open: bar.delta_open.unwrap() as f64,
+                        delta_close: handle_option_value(bar.delta_close.map(|v| v as f64)),
+                        delta_high: bar.delta_high.unwrap() as f64,
                         low: bar.low.unwrap() as f64,
                         volume: bar.volume as u64,
                         timestamp: bar.utc_timestamp_in_minutes.unwrap() as u64,
                     };
-                    let bar_data = bar_data.change_to_actual_symbol_price(
-                        bar.low.unwrap() as u64,
-                        bar.delta_high.unwrap() as u64,
-                        handle_option_value(bar.delta_close.map(|v| v as u64)),
-                        bar.delta_open.unwrap() as u64,
-                        bar.volume as u64,
-                        bar.utc_timestamp_in_minutes.unwrap() as u64,
-                    );
-                    self.event_tx
-                        .send(StreamEvent::LiveData((Some(quote), Some(bar_data))))
-                        .await?;
+
+                    let real_bar = bar_data.change_to_actual_symbol_price();
+
+                    // first-time initialization uses client state, not local vars
+                    if last_bar_ts_guard.is_none() {
+                        *last_bar_guard = Some(bar_data.clone());
+                        *last_quote_guard = Some(quote.clone());
+                        *last_bar_ts_guard = Some(bar_data.timestamp);
+                    }
+
+                   
+
+                    if last_bar_ts_guard.unwrap() < bar_data.timestamp {
+                        let mut last_closed_bar = last_bar_guard.as_ref().unwrap().change_to_actual_symbol_price();
+                        last_closed_bar.close = Some(last_quote_guard.as_ref().unwrap().bid.unwrap());
+
+                        // update stored state for next message
+                        *last_bar_guard = Some(bar_data.clone());
+                        *last_quote_guard = Some(quote.clone());
+                        *last_bar_ts_guard = Some(bar_data.timestamp);
+
+                        self.event_tx
+                            .send(StreamEvent::LiveData((
+                                Some(quote),
+                                Some(real_bar),
+                                Some(last_closed_bar),
+                            )))
+                            .await?;
+                    } else {
+                        *last_bar_guard = Some(bar_data.clone());
+                        *last_quote_guard = Some(quote.clone());
+
+                        self.event_tx
+                            .send(StreamEvent::LiveData((Some(quote), Some(real_bar), None)))
+                            .await?;
+                    }
                 } else {
-                    self.event_tx.send(StreamEvent::LiveData((Some(quote), None))).await?;
+                    self.event_tx
+                        .send(StreamEvent::LiveData((Some(quote), None, None)))
+                        .await?;
                 }
             }
 
@@ -189,13 +217,48 @@ impl super::CtraderClient {
                 println!("Full message: {:#?}", msg);
             }
 
-            //this handles the order event errors 
+            //this handles the order event errors
+            x if x == super::ProtoOaPayloadType::ProtoOaOrderErrorEvent as i32 => {
+                let data = msg.payload.unwrap();
+                let err_event = super::ProtoOaOrderErrorEvent::decode(&data[..])?;
+                self.event_tx
+                    .send(StreamEvent::Error(format!(
+                        "Order error: {}",
+                        err_event.description.unwrap_or_default()
+                    )))
+                    .await?;
+                }
 
-
-            //handles the exectuion event 
-
+            //handles the exectuion event
+            x if x == super::ProtoOaPayloadType::ProtoOaExecutionEvent as i32 => {
+                let data = msg.payload.unwrap();
+                let execution_event = super::ProtoOaExecutionEvent::decode(&data[..])?;
+                self.event_tx
+                    .send(StreamEvent::ExecutionEvent(format!(
+                        "Execution event: {:?}",
+                        execution_event
+                    )))
+                    .await?;
+                }
 
             //catch-all for unhandled message types
+
+            //this handles the response from the ProtoOaGetSymbolByIdReq
+            x if x == super::ProtoOaPayloadType::ProtoOaSymbolByIdRes as i32 => {
+                let mut symbols = Vec::<Symbol>::new();
+                let data = msg.payload.unwrap();
+                let symbol_res = super::ProtoOaSymbolByIdRes::decode(&data[..])?;
+                for symbol in symbol_res.symbol {
+                    symbols.push(Symbol {
+                        symbol_id: symbol.symbol_id as u64,
+                        symbol_name: symbol.symbol_id.to_string()
+                    });
+                }
+                self.event_tx
+                    .send(StreamEvent::SymbolsData(symbols))
+                    .await?;
+            }
+
             _ => {
                 println!("Received unhandled message type: {}", msg.payload_type);
                 println!("Full message: {:#?}", msg);
