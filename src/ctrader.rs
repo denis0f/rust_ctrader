@@ -1,4 +1,4 @@
-use crate::{BarData, Endpoint, StreamEvent, TimeFrame, Order};
+use crate::{BarData, Endpoint, StreamEvent, TimeFrame, Order, RelativeBarData, Quote};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -13,10 +13,10 @@ use crate::open_api::{
     ProtoOaErrorRes, ProtoOaGetAccountListByAccessTokenReq,
     ProtoOaGetAccountListByAccessTokenRes, ProtoOaGetTrendbarsReq, ProtoOaGetTrendbarsRes,
     ProtoOaPayloadType, ProtoOaSymbolsListReq, ProtoOaSymbolsListRes,
-    ProtoPayloadType, ProtoHeartbeatEvent, ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes, ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes,
-    ProtoOaSubscribeLiveTrendbarReq, ProtoOaSubscribeLiveTrendbarRes, ProtoOaUnsubscribeLiveTrendbarReq, ProtoOaUnsubscribeLiveTrendbarRes,
-    ProtoOaSpotEvent, 
-    ProtoOaTrader, ProtoOaTraderReq, ProtoOaTraderRes, ProtoOaTradeData, ProtoOaNewOrderReq, ProtoOaClosePositionReq,
+    ProtoPayloadType, ProtoHeartbeatEvent, ProtoOaSubscribeSpotsReq, ProtoOaUnsubscribeSpotsReq,
+    ProtoOaSubscribeLiveTrendbarReq, ProtoOaUnsubscribeLiveTrendbarReq,
+    ProtoOaSpotEvent, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
+    ProtoOaNewOrderReq, ProtoOaClosePositionReq,
     ProtoOaTradeSide, ProtoOaOrderType, ProtoOaOrderErrorEvent, ProtoOaExecutionEvent
 };
 
@@ -30,6 +30,14 @@ pub struct CtraderClient {
     client_secret: String,
     client_id: String,
     event_tx: mpsc::Sender<StreamEvent>,
+
+    // live state used by the spot/live-bar logic.  These are stored on the
+    // client instance so that successive calls to `handle_proto_message` can
+    // compare the previous bar/quote timestamp instead of resetting on each
+    // invocation.
+    last_bar: Mutex<Option<RelativeBarData>>,
+    last_quote: Mutex<Option<Quote>>,
+    last_bar_ts: Mutex<Option<u64>>,
 }
 
 impl CtraderClient {
@@ -55,20 +63,34 @@ impl CtraderClient {
             client_secret: client_secret.to_string(),
             client_id: client_id.to_string(),
             event_tx,
+            // initialize live-bar state as empty; the first spot event will
+            // populate them.
+            last_bar: Mutex::new(None),
+            last_quote: Mutex::new(None),
+            last_bar_ts: Mutex::new(None),
         };
 
         Ok((Arc::new(client), event_rx))
     }
 
-    pub async fn send_message(
+    pub async fn send_message<M: Message>(
         &self,
-        message: ProtoMessage,
+        payload_type: u32,
+        payload: M,
+        client_msg_id: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let payload_encoded = payload.encode_to_vec();
+        let message = ProtoMessage {
+            payload_type,
+            payload: Some(payload_encoded),
+            client_msg_id,
+        };
+
         let mut stream = self.stream.lock().await;
-        let n = message.encode_to_vec().len() as u32;
+        let encoded_msg = message.encode_to_vec();
+        let n = encoded_msg.len() as u32;
 
         stream.write_u32(n).await?;
-        let encoded_msg = message.encode_to_vec();
         stream.write_all(&encoded_msg).await?;
 
         Ok(())
@@ -119,48 +141,34 @@ impl CtraderClient {
 
     pub async fn authorize_application(&self) -> Result<(), Box<dyn std::error::Error>> {
         println!("Authorizing application...");
-        // Implementation for authorizing the application
-        let _auth_request = ProtoOaApplicationAuthReq {
+        let req = ProtoOaApplicationAuthReq {
             payload_type: Some(ProtoOaPayloadType::ProtoOaApplicationAuthReq as i32),
             client_id: self.client_id.clone(),
             client_secret: self.client_secret.clone(),
         };
 
-        let _auth_request_encoded = _auth_request.encode_to_vec();
-
-        let _message = ProtoMessage {
-            payload_type: ProtoOaPayloadType::ProtoOaApplicationAuthReq as u32,
-            payload: Some(_auth_request_encoded),
-            client_msg_id: Some(String::from("application authorization")),
-        };
-
-        self.send_message(_message)
-            .await
-            .expect("Failed to send application authorization request");
-
+        self.send_message(
+            ProtoOaPayloadType::ProtoOaApplicationAuthReq as u32,
+            req,
+            Some(String::from("application authorization")),
+        )
+        .await?;
         Ok(())
     }
 
     pub async fn get_accounts(&self) -> Result<(), Box<dyn std::error::Error>> {
         println!("Getting accounts...");
-        // Implementation for getting accounts
-        let _accounts_request = ProtoOaGetAccountListByAccessTokenReq {
+        let req = ProtoOaGetAccountListByAccessTokenReq {
             payload_type: Some(ProtoOaPayloadType::ProtoOaGetAccountsByAccessTokenReq as i32),
             access_token: self.access_token.clone(),
         };
 
-        let _accounts_request_encoded = _accounts_request.encode_to_vec();
-
-        let _message = ProtoMessage {
-            payload_type: ProtoOaPayloadType::ProtoOaGetAccountsByAccessTokenReq as u32,
-            payload: Some(_accounts_request_encoded),
-            client_msg_id: Some(String::from("get accounts by access token")),
-        };
-
-        self.send_message(_message)
-            .await
-            .expect("Failed to send get accounts request");
-
+        self.send_message(
+            ProtoOaPayloadType::ProtoOaGetAccountsByAccessTokenReq as u32,
+            req,
+            Some(String::from("get accounts by access token")),
+        )
+        .await?;
         Ok(())
     }
 
@@ -169,25 +177,18 @@ impl CtraderClient {
         account_id: i64,
     ) -> Result<(), Box<dyn std::error::Error>> {
         println!("Authorizing account with ID: {}...", account_id);
-        // Implementation for authorizing the account
-        let _auth_request = ProtoOaAccountAuthReq {
+        let req = ProtoOaAccountAuthReq {
             payload_type: Some(ProtoOaPayloadType::ProtoOaAccountAuthReq as i32),
             ctid_trader_account_id: account_id,
             access_token: self.access_token.clone(),
         };
 
-        let _auth_request_encoded = _auth_request.encode_to_vec();
-
-        let _message = ProtoMessage {
-            payload_type: ProtoOaPayloadType::ProtoOaAccountAuthReq as u32,
-            payload: Some(_auth_request_encoded),
-            client_msg_id: Some(format!("account authorization {}", account_id)),
-        };
-
-        self.send_message(_message)
-            .await
-            .expect("Failed to send account authorization request");
-
+        self.send_message(
+            ProtoOaPayloadType::ProtoOaAccountAuthReq as u32,
+            req,
+            Some(format!("account authorization {}", account_id)),
+        )
+        .await?;
         Ok(())
     }
 
@@ -197,25 +198,18 @@ impl CtraderClient {
         include_archived: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         println!("Getting symbols...");
-        // Implementation for getting symbols
-        let _symbols_request = ProtoOaSymbolsListReq {
+        let req = ProtoOaSymbolsListReq {
             payload_type: Some(ProtoOaPayloadType::ProtoOaSymbolsListReq as i32),
             ctid_trader_account_id: account_id,
             include_archived_symbols: Some(include_archived),
         };
 
-        let _symbols_request_encoded = _symbols_request.encode_to_vec();
-
-        let _message = ProtoMessage {
-            payload_type: ProtoOaPayloadType::ProtoOaSymbolsListReq as u32,
-            payload: Some(_symbols_request_encoded),
-            client_msg_id: Some(String::from("get symbols list")),
-        };
-
-        self.send_message(_message)
-            .await
-            .expect("Failed to send get symbols request");
-
+        self.send_message(
+            ProtoOaPayloadType::ProtoOaSymbolsListReq as u32,
+            req,
+            Some(String::from("get symbols list")),
+        )
+        .await?;
         Ok(())
     }
 
@@ -241,88 +235,93 @@ impl CtraderClient {
             count: Some(200),
         };
 
-        let req_encoded = req.encode_to_vec();
-        let message = ProtoMessage {
-            payload_type: ProtoOaPayloadType::ProtoOaGetTrendbarsReq as u32,
-            payload: Some(req_encoded),
-            client_msg_id: Some(String::from("get trend bar data")),
-        };
-        self.send_message(message)
-            .await
-            .expect("Failed to send get trend bar data request");
-
+        self.send_message(
+            ProtoOaPayloadType::ProtoOaGetTrendbarsReq as u32,
+            req,
+            Some(String::from("get trend bar data")),
+        )
+        .await?;
         Ok(())
     }
+
     pub async fn keep_alive(&self) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Sending keep-alive heartbeat...");
-        // Implementation for keep-alive mechanism
         let heartbeat = ProtoHeartbeatEvent {
             payload_type: Some(ProtoPayloadType::HeartbeatEvent as i32),
         };
 
-        self.send_message(ProtoMessage {
-            payload_type: ProtoPayloadType::HeartbeatEvent as u32,
-            payload: Some(heartbeat.encode_to_vec()),
-            client_msg_id: Some(String::from("keep alive")),
-        })
-        .await
-        .expect("Failed to send heartbeat message");
+        self.send_message(ProtoPayloadType::HeartbeatEvent as u32, heartbeat, Some(String::from("keep alive"))).await?;
 
         Ok(())
     }
 
-
     pub async fn subscribe_spot(&self, account_id: i64, symbol_id: i64) -> Result<(), Box<dyn std::error::Error>> {
-        let subscribe_request = ProtoOaSubscribeSpotsReq {
+        let req = ProtoOaSubscribeSpotsReq {
             payload_type: Some(ProtoOaPayloadType::ProtoOaSubscribeSpotsReq as i32),
-            ctid_trader_account_id: account_id, //account_id,
+            ctid_trader_account_id: account_id,
             symbol_id: vec![symbol_id],
             subscribe_to_spot_timestamp: Some(true),
         };
 
-        let subscribe_request_encoded = subscribe_request.encode_to_vec();
-
-        let message = ProtoMessage {
-            payload_type: ProtoOaPayloadType::ProtoOaSubscribeSpotsReq as u32,
-            payload: Some(subscribe_request_encoded),
-            client_msg_id: Some(String::from("subscribe to spot events")),
-        };
-
-        self.send_message(message)
-            .await
-            .expect("Failed to send subscribe to spot events request");
-
+        self.send_message(
+            ProtoOaPayloadType::ProtoOaSubscribeSpotsReq as u32,
+            req,
+            Some(String::from("subscribe to spot events")),
+        )
+        .await?;
         Ok(())
     }
 
     pub async fn subscribe_live_bars(&self, account_id: i64, symbol_id: i64, timeframe: TimeFrame) -> Result<(), Box<dyn std::error::Error>> {
-
-        //first subscribe to the live spot events for the symbol
+        println!("Subscribing to live bars for symbol ID: {} and timeframe: {:?}...", symbol_id, timeframe);
         self.subscribe_spot(account_id, symbol_id).await?;
+        
 
-        let subscribe_request = ProtoOaSubscribeLiveTrendbarReq {
+        let req = ProtoOaSubscribeLiveTrendbarReq {
             payload_type: Some(ProtoOaPayloadType::ProtoOaSubscribeLiveTrendbarReq as i32),
             ctid_trader_account_id: account_id,
             symbol_id: symbol_id,
             period: timeframe.change_proto_trendbar_period() as i32,
         };
 
-        let subscribe_request_encoded = subscribe_request.encode_to_vec();
-
-        let message = ProtoMessage {
-            payload_type: ProtoOaPayloadType::ProtoOaSubscribeLiveTrendbarReq as u32,
-            payload: Some(subscribe_request_encoded),
-            client_msg_id: Some(String::from("subscribe to live bars")),
-        };
-
-        self.send_message(message)
-            .await
-            .expect("Failed to send subscribe to live bars request");
-
+        self.send_message(
+            ProtoOaPayloadType::ProtoOaSubscribeLiveTrendbarReq as u32,
+            req,
+            Some(String::from("subscribe to live bars")),
+        )
+        .await?;
         Ok(())
     }
 
+    pub async fn new_order(&self, order: Order) -> Result<(), Box<dyn std::error::Error>> {
+        let order_ = order.convert_lot_size_to_volume_points();
+        let new_order_request = order_.to_proto_order_req();
 
+        println!("Sending new order request...");
+        self.send_message(
+            ProtoOaPayloadType::ProtoOaNewOrderReq as u32,
+            new_order_request,
+            Some(String::from("new order request")),
+        )
+        .await?;
+        println!("New order request sent successfully.");
+        Ok(())
+    }
 
+    pub async fn get_symbol_by_id(&self, account_id: i64, symbol_id: i64) -> Result<(), Box<dyn std::error::Error>> {
+        println!("Getting symbol by ID...");
+        let req = ProtoOaSymbolByIdReq {
+            payload_type: Some(ProtoOaPayloadType::ProtoOaSymbolByIdReq as i32),
+            ctid_trader_account_id: account_id,
+            symbol_id: vec![symbol_id],
+        };
+
+        self.send_message(
+            ProtoOaPayloadType::ProtoOaSymbolByIdReq as u32,
+            req,
+            Some(String::from("get symbol by id")),
+        )
+        .await?;
+        Ok(())
+    }
 
 }
