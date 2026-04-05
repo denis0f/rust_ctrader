@@ -41,7 +41,6 @@ struct Ema {
     period: usize,
     multiplier: f64,
     buffer: VecDeque<f64>,
-    emas: Vec<f64>,
     last_ema: Option<f64>,
 }
 
@@ -51,7 +50,6 @@ impl Ema {
             period,
             multiplier: 2.0 / (period as f64 + 1.0),
             buffer: VecDeque::with_capacity(period),
-            emas: Vec::new(),
             last_ema: None,
         }
     }
@@ -59,9 +57,7 @@ impl Ema {
     fn update(&mut self, close: f64) -> Option<f64> {
         if let Some(prev_ema) = self.last_ema {
             let ema = (close - prev_ema) * self.multiplier + prev_ema;
-            self.emas.push(ema);
             self.last_ema = Some(ema);
-            println!("Ema: {:?}", self.emas);
             return Some(ema);
         }
 
@@ -110,6 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>{
     let mut account_id = 0_i64;
     let mut ema5 = Ema::new(5);
     let mut ema8 = Ema::new(8);
+    let mut has_position = false;
 
     //listen for events
     while let Some(event) = event_rx.recv().await{
@@ -136,6 +133,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>{
             }
             StreamEvent::SymbolsData(symbols) => {
                 println!("Symbols data received: {:#?}", symbols);
+            
+
 
                 //prepare the timestamp from last monday to today in milliseconds using the chrono crate
                 use chrono::{Utc, Datelike, Duration};
@@ -160,6 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>{
             StreamEvent::LiveData((quote, bar_data, last_closed_candle)) => {
                 //println!("Live data received: Quote: {:#?}, \n BarData: {:#?}, last candle to close is {:?}", quote, bar_data, last_closed_candle);
 
+
                 // Extract close price from last closed candle and update EMAs
                 if let Some(candle) = last_closed_candle {
                     println!("Processing last closed candle: {:#?}", candle);
@@ -174,7 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>{
                         println!("Trading Signal: {:?}", signal);
 
                         // Place order on Buy or Sell signal
-                        if signal == Signal::Buy || signal == Signal::Sell {
+                        if !has_position && (signal == Signal::Buy || signal == Signal::Sell) {
                             let trade_side = match signal {
                                 Signal::Buy => TradeSide::Buy,
                                 Signal::Sell => TradeSide::Sell,
@@ -186,7 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>{
                                 symbol_id: 41,
                                 order_type: OrderType::Market,
                                 trade_side: trade_side.clone(),
-                                lotsize: 1.0,
+                                lotsize: 0.01,
                                 limit_price: None,
                                 stop_price: None,
                                 time_in_force: None,
@@ -203,7 +203,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>{
 
                             println!("Placing {:?} order with signal: {:?}", trade_side, signal);
                             match client.new_order(order).await {
-                                Ok(_) => println!("Order placed successfully"),
+                                Ok(_) => {
+                                    println!("Order placed successfully");
+                                    has_position = true;
+                                }
                                 Err(e) => eprintln!("Failed to place order: {}", e),
                             }
                         }
@@ -216,8 +219,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>{
                 
             }
 
-            _ => {
-            }
+            _ => {}
         }
     }
 

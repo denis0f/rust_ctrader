@@ -38,6 +38,11 @@ pub enum StreamEvent {
     TrendbarsData(Vec<BarData>),
     QuotesData(Vec<Quote>),
     LiveData((Option<Quote>, Option<BarData>, Option<BarData>)),
+    /// Returned whenever the client has retrieved detailed symbol metadata.
+    /// The contained map is a snapshot of the updated entries.  Callers may
+    /// also query `CtraderClient::symbol_data` directly instead of using this
+    /// event.
+    SymbolData(Vec<Symbol>),
     SubscribeSpotsData(String),
     SubscribeLiveBarsData(String),
     ExecutionEvent(String),
@@ -49,6 +54,22 @@ pub struct Symbol {
     pub symbol_name: String,
     pub symbol_id: u64,
 }
+
+/// Information about a symbol returned by the symbol‑by‑id request.  We cache
+/// only the fields required for volume conversion so that `Order` handling
+/// can look up `max_volume`/`min_volume` etc.  Storing it in a small struct
+/// also makes it convenient to keep behind a `HashMap` in the client.
+#[derive(Debug, Clone)]
+pub struct SymbolData {
+    pub symbol_id: u64,
+    pub max_volume: Option<i64>,
+    pub min_volume: Option<i64>,
+    pub step_volume: Option<i64>,
+    pub digits: Option<i32>,
+    pub pip_position: Option<i32>,
+    pub lot_size: Option<i64>,
+}
+
 
 #[derive(Debug)]
 pub struct BarData {
@@ -218,69 +239,4 @@ pub struct Order{
 }
 
 impl Order {
-    pub fn convert_lot_size_to_volume_points(self) -> Self{
-        let lot = self.lotsize;
-        let mut new_lotsize: f64 = 0.01;
-        
-        if lot > 0.00 && lot < 0.10 {
-            new_lotsize = lot * 10000000 as f64;
-        } else if lot >= 0.10 && lot < 1.00 {
-            new_lotsize = lot * 100000000 as f64;
-        } else if lot >= 1.0 {
-            new_lotsize = lot * 100000 as f64;
-        } 
-        let order =self;
-
-        Self{
-            lotsize: new_lotsize,
-            ..order
-        }
-
-    }
-
-    /// Convert the Order struct to the proto buffer representation.
-    /// This prepares the order for sending over the network.
-    pub fn to_proto_order_req(&self) -> crate::open_api::ProtoOaNewOrderReq {
-        
-        use crate::open_api::{ProtoOaNewOrderReq, ProtoOaOrderType, ProtoOaTradeSide};
-
-        let order_type = match self.order_type {
-            OrderType::Market => ProtoOaOrderType::Market as i32,
-            OrderType::Limit => ProtoOaOrderType::Limit as i32,
-            OrderType::Stop => ProtoOaOrderType::Stop as i32,
-            OrderType::StopLimit => ProtoOaOrderType::StopLimit as i32,
-        };
-
-        let trade_side = match self.trade_side {
-            TradeSide::Buy => ProtoOaTradeSide::Buy as i32,
-            TradeSide::Sell => ProtoOaTradeSide::Sell as i32,
-        };
-
-
-        ProtoOaNewOrderReq {
-            payload_type: Some(crate::open_api::ProtoOaPayloadType::ProtoOaNewOrderReq as i32),
-            ctid_trader_account_id: self.account_id as i64,
-            symbol_id: self.symbol_id as i64,
-            order_type,
-            trade_side,
-            volume: self.lotsize as i64,
-            limit_price: self.limit_price,
-            stop_price: self.stop_price,
-            time_in_force: None,
-            expiration_timestamp: self.expiration_timestamp,
-            stop_loss: self.relative_stop_loss.map(|x| x as f64),
-            take_profit: self.relative_take_profit.map(|x| x as f64),
-            comment: self.comment.clone(),
-            base_slippage_price: None,
-            slippage_in_points: self.slippage_in_points,
-            label: self.label.clone(),
-            position_id: None,
-            client_order_id: self.client_order_id.clone(),
-            relative_stop_loss: self.relative_stop_loss,
-            relative_take_profit: self.relative_take_profit,
-            guaranteed_stop_loss: self.guaranteed_stop_loss,
-            trailing_stop_loss: self.trailing_stop_loss,
-            stop_trigger_method: None,
-        }
-    }
 }

@@ -11,7 +11,7 @@ pub use auth::AuthClient;
 pub use ctrader::CtraderClient;
 pub use types::{
     Account, BarData, Endpoint, Quote, Scope, StreamEvent,
-    Symbol, TimeFrame, Tokens, Order, RelativeBarData
+    Symbol, SymbolData, TimeFrame, Tokens, Order, RelativeBarData
 };
 
 //pub use ctrader_::CtraderClient;

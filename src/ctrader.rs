@@ -1,4 +1,5 @@
 use crate::{BarData, Endpoint, StreamEvent, TimeFrame, Order, RelativeBarData, Quote};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -30,6 +31,12 @@ pub struct CtraderClient {
     client_secret: String,
     client_id: String,
     event_tx: mpsc::Sender<StreamEvent>,
+
+    // cached symbol metadata (max/min volume, digits, etc).  keyed by symbol
+    // id so that we can avoid redundant round‑trips when subscribing to live
+    // data.  a `Mutex` is fine because the typical access pattern is
+    // ``lock->check->insert`` which keeps the critical section tiny.
+    pub symbol_data: Mutex<HashMap<u64, crate::types::SymbolData>>,
 
     // live state used by the spot/live-bar logic.  These are stored on the
     // client instance so that successive calls to `handle_proto_message` can
@@ -63,6 +70,7 @@ impl CtraderClient {
             client_secret: client_secret.to_string(),
             client_id: client_id.to_string(),
             event_tx,
+            symbol_data: Mutex::new(HashMap::new()),
             // initialize live-bar state as empty; the first spot event will
             // populate them.
             last_bar: Mutex::new(None),
@@ -271,10 +279,29 @@ impl CtraderClient {
         Ok(())
     }
 
-    pub async fn subscribe_live_bars(&self, account_id: i64, symbol_id: i64, timeframe: TimeFrame) -> Result<(), Box<dyn std::error::Error>> {
+    // note: we accept `self: &Arc<Self>` so that a cloned handle can be moved
+    // into the spawned task without borrowing `&self` itself.
+    pub async fn subscribe_live_bars(self: &Arc<Self>, account_id: i64, symbol_id: i64, timeframe: TimeFrame) -> Result<(), Box<dyn std::error::Error>> {
         println!("Subscribing to live bars for symbol ID: {} and timeframe: {:?}...", symbol_id, timeframe);
         self.subscribe_spot(account_id, symbol_id).await?;
-        
+
+        // ensure we have the data cached; only ask once per symbol. spawn a
+        // background task that we await after we finish sending the subscription
+        // message. by cloning `Arc<Self>` we avoid lifetime issues.
+        let maybe_task = {
+            let client = Arc::clone(self);
+            let map = client.symbol_data.lock().await;
+            if !map.contains_key(&(symbol_id as u64)) {
+                let client_message = Some(String::from("sent by live_bar_subscription"));
+                drop(map);
+                Some(tokio::spawn(async move {
+                    client.get_symbol_by_id(account_id, symbol_id, client_message).await
+                }))
+            } else {
+                None
+            }
+        };
+        println!("Sending live bar subscription message...");
 
         let req = ProtoOaSubscribeLiveTrendbarReq {
             payload_type: Some(ProtoOaPayloadType::ProtoOaSubscribeLiveTrendbarReq as i32),
@@ -289,12 +316,74 @@ impl CtraderClient {
             Some(String::from("subscribe to live bars")),
         )
         .await?;
+
+        println!("Live bar subscription message sent successfully.");
+
+        if let Some(handle) = maybe_task {
+            // propagate any error from the spawned symbol request
+            handle.await??;
+        }
+        println!("Live bar subscription setup complete.");
+
         Ok(())
     }
 
     pub async fn new_order(&self, order: Order) -> Result<(), Box<dyn std::error::Error>> {
-        let order_ = order.convert_lot_size_to_volume_points();
-        let new_order_request = order_.to_proto_order_req();
+        // Ensure we have the symbol data cached
+        let symbol_id_u64 = order.symbol_id;
+        let account_id = order.account_id as i64;
+        let symbol_id = order.symbol_id as i64;
+
+        {
+            let map = self.symbol_data.lock().await;
+            if !map.contains_key(&symbol_id_u64) {
+                drop(map);
+                self.get_symbol_by_id(account_id, symbol_id, Some("new order symbol lookup".to_string())).await?;
+            }
+        }
+
+        // Get lot_size
+        let lot_size = {
+            let map = self.symbol_data.lock().await;
+            map.get(&symbol_id_u64).and_then(|sd| sd.lot_size).unwrap_or(10000) as f64
+        };
+
+        // Compute volume in protocol units (0.01 of a unit)
+        let volume = (order.lotsize * lot_size) as i64;
+
+        let new_order_request = ProtoOaNewOrderReq {
+            payload_type: Some(ProtoOaPayloadType::ProtoOaNewOrderReq as i32),
+            ctid_trader_account_id: order.account_id as i64,
+            symbol_id: order.symbol_id as i64,
+            order_type: match order.order_type {
+                crate::types::OrderType::Market => ProtoOaOrderType::Market as i32,
+                crate::types::OrderType::Limit => ProtoOaOrderType::Limit as i32,
+                crate::types::OrderType::Stop => ProtoOaOrderType::Stop as i32,
+                crate::types::OrderType::StopLimit => ProtoOaOrderType::StopLimit as i32,
+            },
+            trade_side: match order.trade_side {
+                crate::types::TradeSide::Buy => ProtoOaTradeSide::Buy as i32,
+                crate::types::TradeSide::Sell => ProtoOaTradeSide::Sell as i32,
+            },
+            volume,
+            limit_price: order.limit_price,
+            stop_price: order.stop_price,
+            time_in_force: None, // You can map order.time_in_force if needed
+            expiration_timestamp: order.expiration_timestamp,
+            stop_loss: order.relative_stop_loss.map(|x| x as f64),
+            take_profit: order.relative_take_profit.map(|x| x as f64),
+            comment: order.comment.clone(),
+            base_slippage_price: None,
+            slippage_in_points: order.slippage_in_points,
+            label: order.label.clone(),
+            position_id: None,
+            client_order_id: order.client_order_id.clone(),
+            relative_stop_loss: order.relative_stop_loss,
+            relative_take_profit: order.relative_take_profit,
+            guaranteed_stop_loss: order.guaranteed_stop_loss,
+            trailing_stop_loss: order.trailing_stop_loss,
+            stop_trigger_method: None,
+        };
 
         println!("Sending new order request...");
         self.send_message(
@@ -307,7 +396,7 @@ impl CtraderClient {
         Ok(())
     }
 
-    pub async fn get_symbol_by_id(&self, account_id: i64, symbol_id: i64) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn get_symbol_by_id(&self, account_id: i64, symbol_id: i64, client_msg: Option<String>) -> anyhow::Result<()> {
         println!("Getting symbol by ID...");
         let req = ProtoOaSymbolByIdReq {
             payload_type: Some(ProtoOaPayloadType::ProtoOaSymbolByIdReq as i32),
@@ -315,13 +404,33 @@ impl CtraderClient {
             symbol_id: vec![symbol_id],
         };
 
-        self.send_message(
+        
+        match self.send_message(
             ProtoOaPayloadType::ProtoOaSymbolByIdReq as u32,
             req,
-            Some(String::from("get symbol by id")),
-        )
-        .await?;
-        Ok(())
+            if client_msg.is_some() { client_msg} else {Some(String::from("get symbol by id"))},
+        ).await {
+                Ok(()) => {
+
+                        println!("the symbol request sent successfully");
+                        return Ok(());
+                        
+                    }
+                
+                Err(e) => {
+                    println!("Error reading proto message");
+
+                    return Err(anyhow::format_err!(e.to_string()));
+                    
+                }
+            }
+        
     }
+
+    /// Return a clone of the cached symbol metadata, if available.
+    pub async fn symbol_data(&self, symbol_id: u64) -> Option<crate::types::SymbolData> {
+        self.symbol_data.lock().await.get(&symbol_id).cloned()
+    }
+
 
 }

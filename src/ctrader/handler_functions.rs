@@ -197,6 +197,7 @@ impl super::CtraderClient {
                     } else {
                         *last_bar_guard = Some(bar_data.clone());
                         *last_quote_guard = Some(quote.clone());
+                        
 
                         self.event_tx
                             .send(StreamEvent::LiveData((Some(quote), Some(real_bar), None)))
@@ -245,18 +246,41 @@ impl super::CtraderClient {
 
             //this handles the response from the ProtoOaGetSymbolByIdReq
             x if x == super::ProtoOaPayloadType::ProtoOaSymbolByIdRes as i32 => {
-                let mut symbols = Vec::<Symbol>::new();
-                let data = msg.payload.unwrap();
-                let symbol_res = super::ProtoOaSymbolByIdRes::decode(&data[..])?;
-                for symbol in symbol_res.symbol {
-                    symbols.push(Symbol {
-                        symbol_id: symbol.symbol_id as u64,
-                        symbol_name: symbol.symbol_id.to_string()
-                    });
+                // only process the returned symbol when the request was the one we
+                // sent from `subscribe_live_bars` (identified by the specific
+                // client message string).  any other callers are ignored.
+                if msg.client_msg_id.as_deref() == Some("sent by live_bar_subscription") {
+                    let data = msg.payload.unwrap();
+                    let symbol_res = super::ProtoOaSymbolByIdRes::decode(&data[..])?;
+
+                    // store detailed fields in cache for later volume conversions
+                    let mut cache = self.symbol_data.lock().await;
+                    for proto in &symbol_res.symbol {
+                        let sd = crate::types::SymbolData {
+                            symbol_id: proto.symbol_id as u64,
+                            max_volume: proto.max_volume,
+                            min_volume: proto.min_volume,
+                            step_volume: proto.step_volume,
+                            digits: Some(proto.digits),
+                            pip_position: Some(proto.pip_position),
+                            lot_size: proto.lot_size,
+                        };
+                        cache.insert(sd.symbol_id, sd);
+                        return Ok(()); // exit after caching the symbol data, no need to send an event
+                    }
+
+                    let mut symbols = Vec::<Symbol>::new();
+                    for symbol in symbol_res.symbol {
+                        symbols.push(Symbol {
+                            symbol_id: symbol.symbol_id as u64,
+                            symbol_name: symbol.symbol_id.to_string(),
+                        });
+                    }
+
+                    self.event_tx
+                        .send(StreamEvent::SymbolsData(symbols))
+                        .await?;
                 }
-                self.event_tx
-                    .send(StreamEvent::SymbolsData(symbols))
-                    .await?;
             }
 
             _ => {
