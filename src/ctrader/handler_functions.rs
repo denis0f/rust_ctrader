@@ -1,4 +1,4 @@
-use crate::types::{Account, BarData, Quote, RelativeBarData, Scope, StreamEvent, Symbol};
+use crate::types::{Account, BarData, Position, Quote, RelativeBarData, Scope, StreamEvent, Symbol};
 use prost::Message;
 
 use crate::utilities::handle_option_value;
@@ -230,17 +230,31 @@ impl super::CtraderClient {
                     .await?;
                 }
 
-            //handles the exectuion event
+            //handles the execution event
             x if x == super::ProtoOaPayloadType::ProtoOaExecutionEvent as i32 => {
                 let data = msg.payload.unwrap();
                 let execution_event = super::ProtoOaExecutionEvent::decode(&data[..])?;
-                self.event_tx
-                    .send(StreamEvent::ExecutionEvent(format!(
-                        "Execution event: {:?}",
-                        execution_event
-                    )))
+                let mut _position = Position::new();
+                if let Some(position) = execution_event.position{
+                    _position.id = position.position_id;
+                    _position.status = position.position_status;
+                    _position.stop_loss = position.stop_loss;
+                    _position.take_profit = position.take_profit;
+
+                }
+                if let Some(order) = execution_event.order{
+                    _position.order_id = Some(order.order_id);
+                    _position.volume = order.trade_data.volume;
+                    
+                }
+                _position.account_id = Some(execution_event.ctid_trader_account_id);
+                if _position.status == 1_i32{
+                    self.event_tx
+                    .send(StreamEvent::ExecutionEvent(_position))
                     .await?;
                 }
+                
+            }
 
             //catch-all for unhandled message types
 

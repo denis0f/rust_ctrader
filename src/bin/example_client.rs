@@ -26,87 +26,47 @@
 // 8. Run the binary with `cargo run --bin example_client` after populating .env.
 
 use dotenv::dotenv;
-use rust_ctrader::{CtraderClient, Endpoint, StreamEvent, TimeFrame, types::Order, types::TradeSide, types::OrderType};
+use rust_ctrader::{CtraderClient, Endpoint, StreamEvent, TimeFrame, types::{Signal, Position}, strategies::{self,  moving_average_strategy::{Ema}}};
 use std::env;
-use std::collections::VecDeque;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Signal {
-    Buy,
-    Sell,
-    Hold,
-}
 
-struct Ema {
-    period: usize,
-    multiplier: f64,
-    buffer: VecDeque<f64>,
-    last_ema: Option<f64>,
-}
-
-impl Ema {
-    fn new(period: usize) -> Self {
-        Self {
-            period,
-            multiplier: 2.0 / (period as f64 + 1.0),
-            buffer: VecDeque::with_capacity(period),
-            last_ema: None,
-        }
-    }
-
-    fn update(&mut self, close: f64) -> Option<f64> {
-        if let Some(prev_ema) = self.last_ema {
-            let ema = (close - prev_ema) * self.multiplier + prev_ema;
-            self.last_ema = Some(ema);
-            return Some(ema);
-        }
-
-        self.buffer.push_back(close);
-
-        if self.buffer.len() < self.period {
-            return None;
-        }
-
-        let sma = self.buffer.iter().sum::<f64>() / self.period as f64;
-        self.last_ema = Some(sma);
-
-        Some(sma)
-    }
-}
-
-fn get_crossover_signal(ema_short: Option<f64>, ema_long: Option<f64>) -> Signal {
-    match (ema_short, ema_long) {
-        (Some(short), Some(long)) => {
-            if short > long {
-                Signal::Buy
-            } else if short < long {
-                Signal::Sell
-            } else {
-                Signal::Hold
-            }
-        }
-        _ => Signal::Hold,
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>>{
     dotenv().ok();
 
+    println!("Getting the environment variables...");
+
     let client_id = env::var("client_id")?;
     let client_secret = env::var("client_secret")?;
     let access_token = env::var("access_token")?;
 
-    let (client, mut event_rx) = CtraderClient::connect(&client_id, &client_secret, &access_token, Endpoint::Demo).await?;
+
+    println!("Connecting to cTrader Open API...");
+
+    let (mut client, mut event_rx) = CtraderClient::connect(&client_id, &client_secret, &access_token, Endpoint::Demo).await?;
 
     client.start().await;
 
     client.authorize_application().await?;
 
+    let short_period: usize = 2_usize;
+    let long_period = 3_usize;
+
     let mut account_id = 0_i64;
-    let mut ema5 = Ema::new(5);
-    let mut ema8 = Ema::new(8);
-    let mut has_position = false;
+    let mut fast_ema = Ema::new(short_period);
+    let mut slow_ema = Ema::new(long_period);
+
+    let mut fast_prev_ema: Option<f64> = None;
+    let mut slow_prev_ema: Option<f64> = None;
+    let mut current_slow_ema = None;
+    let mut current_fast_ema = None;
+    let mut prev_signal = Signal::Hold;
+
+    let mut positions: Vec<Position> = Vec::new();
+
+    let mut in_position = false;
+
 
     //listen for events
     while let Some(event) = event_rx.recv().await{
@@ -117,8 +77,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>{
             }
             StreamEvent::AccountsData(accounts) => {
                 println!("Accounts data received: {:#?}", accounts);
-                account_id = accounts[1].id as i64; //select the second account for authorization
-                client.authorize_account(accounts[1].id as i64).await?; 
+                account_id = accounts[0].id as i64; //select the first account for authorization
+                client.authorize_account(accounts[0].id as i64).await?; 
             }
             StreamEvent::AccountAuthorized(msg) => {
                 println!("Account authorized event received: {}", msg);
@@ -129,6 +89,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>{
                 //requesting trend bar data for the last week for the selected symbol client.get_trend_bar_data(symbols[4].symbol_id as i64, TimeFrame::M1, account_id, from_timestamp, to_timestamp).await?;
                 
                 client.subscribe_live_bars(account_id, 41 as i64, TimeFrame::M1).await?;
+
+                println!("Subscribed to live bars for symbol ID 41 on account ID {}.", account_id);
 
             }
             StreamEvent::SymbolsData(symbols) => {
@@ -157,61 +119,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>{
             }
             
             StreamEvent::LiveData((quote, bar_data, last_closed_candle)) => {
-                //println!("Live data received: Quote: {:#?}, \n BarData: {:#?}, last candle to close is {:?}", quote, bar_data, last_closed_candle);
+                //on last closed bar receiving to calculate the ema 
+                let close_price = match &last_closed_candle{
+                    
+                    Some(bar_data) => {
+                        println!("the last_closed_candle data received: {:#?}", last_closed_candle);
+                        bar_data.close
+                    },
+                    None => None
+                };
+            
 
+                if let Some(close) = close_price{
+                    current_slow_ema = slow_ema.update(close);
+                    current_fast_ema = fast_ema.update(close);
+                    println!("Previous EMAs - Fast EMA: {:?}, Slow EMA: {:?}", fast_prev_ema, slow_prev_ema);
+                    println!("Updated EMAs - Fast EMA: {:?}, Slow EMA: {:?}", current_fast_ema, current_slow_ema);
 
-                // Extract close price from last closed candle and update EMAs
-                if let Some(candle) = last_closed_candle {
-                    println!("Processing last closed candle: {:#?}", candle);
-                    if let Some(close_price) = candle.close {
-                        let ema5_val = ema5.update(close_price);
-                        let ema8_val = ema8.update(close_price);
-
-                        println!("EMA5: {:?}, EMA8: {:?}", ema5_val, ema8_val);
-
-                        // Check for crossover signal when both EMAs are calculated
-                        let signal = get_crossover_signal(ema5_val, ema8_val);
-                        println!("Trading Signal: {:?}", signal);
-
-                        // Place order on Buy or Sell signal
-                        if !has_position && (signal == Signal::Buy || signal == Signal::Sell) {
-                            let trade_side = match signal {
-                                Signal::Buy => TradeSide::Buy,
-                                Signal::Sell => TradeSide::Sell,
-                                Signal::Hold => unreachable!(),
-                            };
-
-                            let order = Order {
-                                account_id: account_id as u64,
-                                symbol_id: 41,
-                                order_type: OrderType::Market,
-                                trade_side: trade_side.clone(),
-                                lotsize: 0.01,
-                                limit_price: None,
-                                stop_price: None,
-                                time_in_force: None,
-                                expiration_timestamp: None,
-                                comment: Some("Auto trade from EMA crossover".to_string()),
-                                slippage_in_points: None,
-                                label: None,
-                                client_order_id: None,
-                                relative_stop_loss: None,
-                                relative_take_profit: None,
-                                guaranteed_stop_loss: None,
-                                trailing_stop_loss: None,
-                            };
-
-                            println!("Placing {:?} order with signal: {:?}", trade_side, signal);
-                            match client.new_order(order).await {
-                                Ok(_) => {
-                                    println!("Order placed successfully");
-                                    has_position = true;
-                                }
-                                Err(e) => eprintln!("Failed to place order: {}", e),
-                            }
-                        }
-                    }
                 }
+                
+                //getting the signal
+                let signal = strategies::get_signal(current_fast_ema, current_slow_ema, &mut slow_prev_ema, &mut fast_prev_ema);
+
+                //placing a trade accorging to the signal genrated 
+                if signal != Signal::Hold{
+                    println!("Signal generated: {:?}. Attempting to take a trade...", signal);
+                    strategies::take_a_trade(&mut client.clone(), account_id, signal, &mut in_position, &mut prev_signal, &mut positions).await?;
+                }
+
+            }
+
+            //handle order execution events
+            StreamEvent::ExecutionEvent(position) => {
+
+                positions.push(position.clone());
+                println!("Order execution event received: {:#?}", position);
+                // Further actions can be taken here after receiving order execution events
             }
             
             StreamEvent::Error(err_msg) => {
