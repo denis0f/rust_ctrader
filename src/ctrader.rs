@@ -1,4 +1,4 @@
-use crate::{BarData, Endpoint, StreamEvent, TimeFrame, Order, RelativeBarData, Quote};
+use crate::{BarData, Endpoint, StreamEvent, TimeFrame, Order, RelativeBarData, Quote, utilities};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -18,7 +18,8 @@ use crate::open_api::{
     ProtoOaSubscribeLiveTrendbarReq, ProtoOaUnsubscribeLiveTrendbarReq,
     ProtoOaSpotEvent, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
     ProtoOaNewOrderReq, ProtoOaClosePositionReq,
-    ProtoOaTradeSide, ProtoOaOrderType, ProtoOaOrderErrorEvent, ProtoOaExecutionEvent
+    ProtoOaTradeSide, ProtoOaOrderType, ProtoOaOrderErrorEvent, ProtoOaExecutionEvent,
+    ProtoOaOrderListReq, ProtoOaOrderListRes
 };
 
 //the stream builder module
@@ -334,22 +335,10 @@ impl CtraderClient {
         let account_id = order.account_id as i64;
         let symbol_id = order.symbol_id as i64;
 
-        {
-            let map = self.symbol_data.lock().await;
-            if !map.contains_key(&symbol_id_u64) {
-                drop(map);
-                self.get_symbol_by_id(account_id, symbol_id, Some("new order symbol lookup".to_string())).await?;
-            }
-        }
-
-        // Get lot_size
-        let lot_size = {
-            let map = self.symbol_data.lock().await;
-            map.get(&symbol_id_u64).and_then(|sd| sd.lot_size).unwrap_or(10000) as f64
-        };
+        
 
         // Compute volume in protocol units (0.01 of a unit)
-        let volume = (order.lotsize * lot_size) as i64;
+        let volume = utilities::lots_to_protocol_std_volume(self, symbol_id, account_id, order.lotsize).await?;
 
         let new_order_request = ProtoOaNewOrderReq {
             payload_type: Some(ProtoOaPayloadType::ProtoOaNewOrderReq as i32),
@@ -393,6 +382,55 @@ impl CtraderClient {
         )
         .await?;
         println!("New order request sent successfully.");
+        Ok(())
+    }
+
+    pub async fn close_position(
+        &self,
+        account_id: i64,
+        position_id: i64,
+        volume: i64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        println!("Closing position {}...", position_id);
+
+
+
+        let req = ProtoOaClosePositionReq {
+            payload_type: Some(ProtoOaPayloadType::ProtoOaClosePositionReq as i32),
+            ctid_trader_account_id: account_id,
+            position_id,
+            volume
+        };
+
+        self.send_message(
+            ProtoOaPayloadType::ProtoOaClosePositionReq as u32,
+            req,
+            Some(String::from("close position request")),
+        )
+        .await?;
+
+        println!("Close position request sent successfully.");
+        Ok(())
+    }
+
+    //getting the open positions for an account
+    pub async fn get_open_positions(&self, account_id: i64) -> Result<(), Box<dyn std::error::Error>> {
+        println!("Getting open positions for account ID: {}...", account_id);
+
+        ///send the order list request message to get the open positions for the account
+        let req = ProtoOaOrderListReq {
+            payload_type: Some(ProtoOaPayloadType::ProtoOaOrderListReq as i32),
+            ctid_trader_account_id: account_id,
+            from_timestamp: None,
+            to_timestamp: None,
+        };
+
+        self.send_message(
+            ProtoOaPayloadType::ProtoOaOrderListReq as u32,
+            req,
+            Some(String::from("get open positions")),
+        ).await?;
+
         Ok(())
     }
 
