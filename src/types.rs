@@ -1,6 +1,6 @@
+use crate::utilities::{handle_option_value, handle_timestamp};
 use round::round;
 use serde::Deserialize;
-use crate::utilities::{handle_option_value, handle_timestamp};
 
 use crate::open_api::ProtoOaTrendbarPeriod;
 
@@ -45,7 +45,7 @@ pub enum StreamEvent {
     SymbolData(Vec<Symbol>),
     SubscribeSpotsData(String),
     SubscribeLiveBarsData(String),
-    ExecutionEvent(String),
+    ExecutionEvent(Position),
     Error(String),
 }
 
@@ -69,7 +69,6 @@ pub struct SymbolData {
     pub pip_position: Option<i32>,
     pub lot_size: Option<i64>,
 }
-
 
 #[derive(Debug)]
 pub struct BarData {
@@ -95,21 +94,17 @@ impl Clone for BarData {
 }
 
 #[derive(Debug, Clone)]
-pub struct RelativeBarData{
+pub struct RelativeBarData {
     pub delta_open: f64,
     pub delta_close: Option<f64>,
     pub delta_high: f64,
     pub low: f64,
     pub volume: u64,
     pub timestamp: u64,
-
 }
 
-
 impl RelativeBarData {
-    pub fn change_to_actual_symbol_price(
-        &self,
-    ) -> BarData {
+    pub fn change_to_actual_symbol_price(&self) -> BarData {
         let new_low = round(self.low as f64 / 100_000.0, 4);
         let new_high = round((self.low as f64 + self.delta_high as f64) / 100_000.0, 4);
         let new_close = if let Some(close_val) = handle_option_value(self.delta_close) {
@@ -129,8 +124,6 @@ impl RelativeBarData {
         }
     }
 }
-
-
 
 #[derive(Debug)]
 pub enum TimeFrame {
@@ -214,29 +207,64 @@ pub enum TimeInForce {
     GTD,
     IOC,
     FOK,
-    MOO
+    MOO,
 }
 
-pub struct Order{
+pub struct Order {
     pub account_id: u64,
     pub symbol_id: u64,
     pub order_type: OrderType,
     pub trade_side: TradeSide,
     pub lotsize: f64,
-    pub limit_price: Option<f64>,/// this is madatory when the order type is Limit order
-    pub stop_price: Option<f64>, /// this is madatory when the order type is Stop_Limit order
-    pub time_in_force: Option<TimeInForce>, /// expiration instruction of an oder
-    pub expiration_timestamp: Option<i64>,/// this is the epiration time for the GTD orders 
+    pub limit_price: Option<f64>,
+    /// this is madatory when the order type is Limit order
+    pub stop_price: Option<f64>,
+    /// this is madatory when the order type is Stop_Limit order
+    pub time_in_force: Option<TimeInForce>,
+    /// expiration instruction of an oder
+    pub expiration_timestamp: Option<i64>,
+    /// this is the epiration time for the GTD orders
     pub comment: Option<String>,
-    pub slippage_in_points: Option<i32>, /// this is the number of the points you want to allow for slippage for the limit/market orders 
+    pub slippage_in_points: Option<i32>,
+    /// this is the number of the points you want to allow for slippage for the limit/market orders
     pub label: Option<String>,
     pub client_order_id: Option<String>,
     pub relative_stop_loss: Option<i64>,
     pub relative_take_profit: Option<i64>,
-    pub guaranteed_stop_loss: Option<bool>,/// supposed to be set to true for the limited risk accounts
+    pub guaranteed_stop_loss: Option<bool>,
+    /// supposed to be set to true for the limited risk accounts
     pub trailing_stop_loss: Option<bool>,
-    
 }
 
-impl Order {
+impl Order {}
+
+#[derive(Debug, Clone)]
+pub struct Position {
+    pub id: i64,
+    pub account_id: Option<i64>,
+    pub status: i32,
+    pub take_profit: Option<f64>,
+    pub stop_loss: Option<f64>,
+    pub volume: i64,
+    pub order_id: Option<i64>,
+}
+impl Position {
+    pub fn new() -> Self {
+        Self {
+            id: 0,
+            account_id: None,
+            status: 0,
+            take_profit: None,
+            stop_loss: None,
+            volume: 0,
+            order_id: None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Signal {
+    Buy,
+    Sell,
+    Hold,
 }
